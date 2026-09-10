@@ -1,0 +1,76 @@
+{
+  "name": "crm-employee-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "author": "Business OS",
+  "description": "Employee desktop app for Business OS with clocked-in work screenshots.",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "portals": "node scripts/bundle-portals.mjs",
+    "pack": "electron-builder --win dir --publish never",
+    "dist": "npm run portals && electron-builder --win nsis --publish never"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.4",
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.businessos.crm-employee",
+    "productName": "CRM Employee",
+    "copyright": "Copyright © Business OS",
+    "asar": true,
+    "icon": "build/icon.ico",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "build/icon.png",
+      "build/icon.ico",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "portals",
+        "to": "portals"
+      },
+      {
+        "from": ".env.example",
+        "to": ".env.example"
+      },
+      {
+        "from": ".env",
+        "to": ".env"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "signExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CRM Employee",
+      "uninstallDisplayName": "CRM Employee"
+    },
+    "publish": null
+  }
+}
