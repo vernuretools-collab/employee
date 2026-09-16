@@ -6,10 +6,11 @@ import { APP_ID, APP_LABEL, PARTITION, loadSupabaseEnv, supabaseAnonKey, supabas
 import { WorkMonitor } from './monitor.js'
 import { portalDistExists, portalUrl, startPortalServers } from './staticServers.js'
 import { appIcon, trayIcon } from './appIcon.js'
+import { setupAutoUpdater } from './updater.js'
 import { readSessionFromWindow } from './session.js'
 
 const require = createRequire(import.meta.url)
-const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell, session, screen } = require('electron')
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell, session, screen, Notification } = require('electron')
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const preloadPath = path.join(__dirname, 'preload.cjs')
@@ -111,6 +112,88 @@ function hideInsteadOfClose(win) {
     event.preventDefault()
     win.hide()
   })
+}
+
+const ZOOM_STEP = 0.1
+const ZOOM_MIN = 0.5
+const ZOOM_MAX = 3
+let appZoomFactor = 1
+
+function hasCtrlOrCmd(input) {
+  return Boolean(
+    input.control ||
+      input.meta ||
+      (Array.isArray(input.modifiers) && (input.modifiers.includes('control') || input.modifiers.includes('meta'))),
+  )
+}
+
+function zoomActionFromInput(input) {
+  if (input.type !== 'keyDown' || input.isComposing || input.alt || !hasCtrlOrCmd(input)) return null
+  const key = String(input.key || '')
+  const code = String(input.code || '')
+  if (key === '+' || key === '=' || key === 'Add' || key === 'Plus' || code === 'Equal' || code === 'NumpadAdd') {
+    return 'in'
+  }
+  if (key === '-' || key === '_' || key === 'Subtract' || code === 'Minus' || code === 'NumpadSubtract') {
+    return 'out'
+  }
+  if (!input.shift && (key === '0' || code === 'Digit0' || code === 'Numpad0')) return 'reset'
+  return null
+}
+
+function applyZoom(win, factor) {
+  if (!win || win.isDestroyed()) return
+  const contents = win.webContents
+  if (typeof contents.setZoomFactor === 'function') {
+    try {
+      contents.setZoomFactor(factor)
+    } catch {
+      /* ignore */
+    }
+  }
+  contents.send('desktop:zoomFactor', factor)
+}
+
+function zoomSession(direction) {
+  if (direction === 'reset') appZoomFactor = 1
+  else if (direction === 'in') appZoomFactor = Math.min(ZOOM_MAX, Math.round((appZoomFactor + ZOOM_STEP) * 10) / 10)
+  else appZoomFactor = Math.max(ZOOM_MIN, Math.round((appZoomFactor - ZOOM_STEP) * 10) / 10)
+  for (const win of sessionWindows()) applyZoom(win, appZoomFactor)
+}
+
+function attachZoomShortcuts(win) {
+  win.webContents.on('did-finish-load', () => applyZoom(win, appZoomFactor))
+  win.webContents.on('before-input-event', (event, input) => {
+    const action = zoomActionFromInput(input)
+    if (!action) return
+    event.preventDefault()
+    zoomSession(action)
+  })
+}
+
+function installAppMenu() {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: 'fileMenu' },
+      { role: 'editMenu' },
+      {
+        label: 'View',
+        submenu: [
+          { role: 'reload' },
+          { role: 'forceReload' },
+          { role: 'toggleDevTools' },
+          { type: 'separator' },
+          { label: 'Zoom In', accelerator: 'CommandOrControl+=', click: () => zoomSession('in') },
+          { label: 'Zoom In', accelerator: 'CommandOrControl+Plus', visible: false, click: () => zoomSession('in') },
+          { label: 'Zoom In', accelerator: 'CommandOrControl+numadd', visible: false, click: () => zoomSession('in') },
+          { label: 'Zoom Out', accelerator: 'CommandOrControl+-', click: () => zoomSession('out') },
+          { label: 'Reset Zoom', accelerator: 'CommandOrControl+0', click: () => zoomSession('reset') },
+          { type: 'separator' },
+          { role: 'togglefullscreen' },
+        ],
+      },
+    ]),
+  )
 }
 
 function updateTray() {
@@ -233,6 +316,7 @@ async function openPortal({ show = true, path: routePath = '' } = {}) {
     title: `${APP_LABEL} portal`,
   })
   portalWindow = win
+  attachZoomShortcuts(win)
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
@@ -285,6 +369,7 @@ function ensureTimingWindow() {
     title: 'My Timing',
   })
   timingWindow = win
+  attachZoomShortcuts(win)
   hideInsteadOfClose(win)
   win.setMinimumSize(TIMING_WIDTH, TIMING_HEIGHT_COMPACT)
   win.setMaximumSize(TIMING_WIDTH, TIMING_HEIGHT_EXPANDED + 160)
@@ -379,6 +464,48 @@ function enableLoginItem() {
   })
 }
 
+const recentNativeTags = new Map()
+const NATIVE_TAG_TTL_MS = 30_000
+
+function normalizePortalPath(routePath = '') {
+  const raw = String(routePath || '').trim()
+  if (!raw) return ''
+  try {
+    if (/^https?:\/\//i.test(raw)) {
+      const u = new URL(raw)
+      return `${u.pathname}${u.search}${u.hash}`
+    }
+  } catch {
+    /* keep raw path */
+  }
+  return raw.startsWith('/') ? raw : `/${raw}`
+}
+
+function showNativeNotification(payload = {}) {
+  const title = String(payload.title || APP_LABEL).trim() || APP_LABEL
+  const body = String(payload.body || '')
+  const tag = String(payload.tag || `${title}:${body}`)
+  const now = Date.now()
+  const last = recentNativeTags.get(tag)
+  if (last && now - last < NATIVE_TAG_TTL_MS) return false
+  recentNativeTags.set(tag, now)
+  for (const [key, at] of recentNativeTags) {
+    if (now - at > NATIVE_TAG_TTL_MS) recentNativeTags.delete(key)
+  }
+  if (!Notification.isSupported()) return false
+  const n = new Notification({
+    title,
+    body,
+    icon: appIcon(),
+    silent: false,
+  })
+  n.on('click', () => {
+    void openPortal({ show: true, path: normalizePortalPath(payload.link) })
+  })
+  n.show()
+  return true
+}
+
 function registerIpc() {
   ipcMain.handle('desktop:getStatus', () => monitor.getStatus())
   ipcMain.handle('desktop:portalReady', () => ({
@@ -405,6 +532,7 @@ function registerIpc() {
     applyTimingSize({ expanded: Boolean(payload?.expanded) })
     return true
   })
+  ipcMain.handle('desktop:showNotification', async (_event, payload) => showNativeNotification(payload || {}))
 }
 
 app.setName('CRM Employee')
@@ -426,12 +554,14 @@ app.whenReady().then(async () => {
     callback(permission === 'media' || permission === 'display-capture' || permission === 'clipboard-sanitized-write')
   })
   registerIpc()
+  installAppMenu()
   try {
     servers = await startPortalServers()
   } catch (err) {
     console.warn('[servers]', err)
   }
   enableLoginItem()
+  setupAutoUpdater()
   createTray()
   monitor.start()
   const autostart = isAutostartLaunch()

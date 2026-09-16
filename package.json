@@ -1,6 +1,6 @@
 {
   "name": "crm-employee-desktop",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "author": "Business OS",
   "description": "Employee desktop app for Business OS with clocked-in work screenshots.",
@@ -10,11 +10,13 @@
     "dev": "electron .",
     "portals": "node scripts/bundle-portals.mjs",
     "pack": "electron-builder --win dir --publish never",
-    "dist": "npm run portals && electron-builder --win nsis --publish never"
+    "dist": "npm run portals && electron-builder --win nsis --publish never",
+    "release": "npm run portals && electron-builder --win nsis --publish always"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
-    "dotenv": "^16.6.1"
+    "dotenv": "^16.6.1",
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "electron": "^37.2.6",
@@ -57,7 +59,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -71,6 +75,10 @@
       "shortcutName": "CRM Employee",
       "uninstallDisplayName": "CRM Employee"
     },
-    "publish": null
+    "publish": {
+      "provider": "github",
+      "owner": "vernuretools-collab",
+      "repo": "employee"
+    }
   }
 }
