@@ -6,7 +6,7 @@ import { APP_ID, APP_LABEL, PARTITION, loadSupabaseEnv, supabaseAnonKey, supabas
 import { WorkMonitor } from './monitor.js'
 import { portalDistExists, portalUrl, startPortalServers } from './staticServers.js'
 import { appIcon, trayIcon } from './appIcon.js'
-import { setupAutoUpdater } from './updater.js'
+import { hasDownloadedUpdate, isQuittingForUpdate, setupAutoUpdater } from './updater.js'
 import { readSessionFromWindow } from './session.js'
 
 const require = createRequire(import.meta.url)
@@ -28,7 +28,13 @@ let attendanceUi = {
   signedIn: false,
   clockedIn: false,
   isOnBreak: false,
+  isOnLunch: false,
 }
+
+monitor.setPauseGetter(() => ({
+  isOnBreak: Boolean(attendanceUi.isOnBreak),
+  isOnLunch: Boolean(attendanceUi.isOnLunch),
+}))
 
 function isAutostartLaunch() {
   return process.argv.includes('--autostart') || Boolean(app.getLoginItemSettings?.().wasOpenedAtLogin)
@@ -75,8 +81,39 @@ function saveTimingBounds() {
 }
 
 const TIMING_WIDTH = 380
-const TIMING_HEIGHT_COMPACT = 430
+const TIMING_HEIGHT_COMPACT = 292
 const TIMING_HEIGHT_EXPANDED = 640
+const THEME_BG = {
+  light: '#f7f7f5',
+  dark: '#0f172a',
+}
+
+function applyWindowTheme(theme) {
+  const bg = theme === 'dark' ? THEME_BG.dark : THEME_BG.light
+  for (const win of sessionWindows()) {
+    try {
+      win.setBackgroundColor(bg)
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function clampTimingPosition(x, y, width, height) {
+  const display = screen.getDisplayNearestPoint({
+    x: Math.round(x + width / 2),
+    y: Math.round(y + 8),
+  })
+  const area = display.workArea
+  const minVisible = 72
+  let nx = Math.round(x)
+  let ny = Math.round(y)
+  if (nx + width < area.x + minVisible) nx = area.x + minVisible - width
+  if (nx > area.x + area.width - minVisible) nx = area.x + area.width - minVisible
+  if (ny < area.y) ny = area.y
+  if (ny > area.y + area.height - 36) ny = area.y + area.height - 36
+  return { x: nx, y: ny }
+}
 
 function clampTimingBounds(bounds = {}, { expanded = timingExpanded } = {}) {
   const area = screen.getPrimaryDisplay().workArea
@@ -99,10 +136,15 @@ function applyTimingSize({ expanded } = {}) {
   if (typeof expanded === 'boolean') timingExpanded = expanded
   if (!timingWindow || timingWindow.isDestroyed()) return
   const next = clampTimingBounds(timingWindow.getBounds(), { expanded: timingExpanded })
+  const maxHeight = TIMING_HEIGHT_EXPANDED + 200
+  timingWindow.setResizable(true)
   timingWindow.setMinimumSize(TIMING_WIDTH, TIMING_HEIGHT_COMPACT)
-  timingWindow.setMaximumSize(TIMING_WIDTH, timingExpanded ? next.height + 200 : TIMING_HEIGHT_COMPACT)
-  timingWindow.setResizable(Boolean(timingExpanded))
+  timingWindow.setMaximumSize(TIMING_WIDTH, maxHeight)
   timingWindow.setBounds(next)
+  if (!timingExpanded) {
+    timingWindow.setMaximumSize(TIMING_WIDTH, TIMING_HEIGHT_COMPACT)
+    timingWindow.setResizable(false)
+  }
   saveTimingBounds()
 }
 
@@ -201,14 +243,17 @@ function updateTray() {
   const monitorStatus = monitor.getStatus()
   const clockedIn = Boolean(attendanceUi.clockedIn || monitorStatus.clockedIn)
   const onBreak = Boolean(attendanceUi.isOnBreak)
+  const onLunch = Boolean(attendanceUi.isOnLunch)
   const signedIn = Boolean(attendanceUi.signedIn)
   const timingVisible = Boolean(timingWindow && !timingWindow.isDestroyed() && timingWindow.isVisible())
   const label = monitorStatus.monitoring
     ? 'Monitoring (clocked in)'
     : clockedIn
-      ? onBreak
-        ? 'On break'
-        : 'Clocked in'
+      ? onLunch
+        ? 'On lunch'
+        : onBreak
+          ? 'On break'
+          : 'Clocked in'
       : 'Idle'
   tray.setToolTip(`CRM Employee — ${label}`)
   tray.setContextMenu(
@@ -275,7 +320,7 @@ async function maybeShowScreenshotNotice() {
   await dialog.showMessageBox({
     type: 'info',
     title: 'Work screenshots',
-    message: 'This desktop app captures your primary screen every 5 minutes while you are clocked in.',
+    message: 'This desktop app captures your primary screen every 10 minutes while you are clocked in.',
     detail:
       'Captures are uploaded to your company workspace for admins to review. The tray icon shows Monitoring while this is active. Clock out to stop.',
     buttons: ['I understand'],
@@ -361,6 +406,7 @@ function ensureTimingWindow() {
       alwaysOnTop: true,
       skipTaskbar: true,
       resizable: true,
+      movable: true,
       minimizable: false,
       maximizable: false,
       fullscreenable: false,
@@ -444,6 +490,7 @@ function handleAttendanceChanged(payload = {}) {
     signedIn: payload.signedIn == null ? attendanceUi.signedIn : Boolean(payload.signedIn),
     clockedIn: Boolean(payload.clockedIn),
     isOnBreak: Boolean(payload.isOnBreak),
+    isOnLunch: Boolean(payload.isOnLunch),
   }
   const action = payload.action || (!prevClockedIn && attendanceUi.clockedIn ? 'clockIn' : null)
   if (action === 'clockIn') timingHiddenByUser = false
@@ -532,6 +579,20 @@ function registerIpc() {
     applyTimingSize({ expanded: Boolean(payload?.expanded) })
     return true
   })
+  ipcMain.handle('desktop:setTheme', async (_event, theme) => {
+    applyWindowTheme(theme === 'dark' ? 'dark' : 'light')
+    return true
+  })
+  ipcMain.on('desktop:moveMyTimingBy', (event, payload = {}) => {
+    if (!timingWindow || timingWindow.isDestroyed()) return
+    if (event.sender !== timingWindow.webContents) return
+    const dx = Number(payload.dx)
+    const dy = Number(payload.dy)
+    if (!Number.isFinite(dx) || !Number.isFinite(dy) || (dx === 0 && dy === 0)) return
+    const bounds = timingWindow.getBounds()
+    const next = clampTimingPosition(bounds.x + dx, bounds.y + dy, bounds.width, bounds.height)
+    timingWindow.setPosition(next.x, next.y, false)
+  })
   ipcMain.handle('desktop:showNotification', async (_event, payload) => showNativeNotification(payload || {}))
 }
 
@@ -550,9 +611,17 @@ if (!gotLock) {
 app.whenReady().then(async () => {
   if (!gotLock) return
   loadSupabaseEnv()
-  session.fromPartition(PARTITION).setPermissionRequestHandler((_wc, permission, callback) => {
-    callback(permission === 'media' || permission === 'display-capture' || permission === 'clipboard-sanitized-write')
+  const desktopSession = session.fromPartition(PARTITION)
+  const allowedPermissions = new Set([
+    'media',
+    'display-capture',
+    'clipboard-sanitized-write',
+    'geolocation',
+  ])
+  desktopSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(allowedPermissions.has(permission))
   })
+  desktopSession.setPermissionCheckHandler(() => true)
   registerIpc()
   installAppMenu()
   try {
@@ -579,15 +648,21 @@ app.on('window-all-closed', () => {
   // Stay in the tray.
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (isQuitting || isQuittingForUpdate() || hasDownloadedUpdate()) return
+  event.preventDefault()
   isQuitting = true
   saveTimingBounds()
-  monitor.stop()
-  for (const server of servers) {
-    try {
-      server.close()
-    } catch {
-      /* ignore */
+  const flush = Promise.resolve(monitor.stop())
+  const timeout = new Promise((resolve) => setTimeout(resolve, 5000))
+  Promise.race([flush, timeout]).finally(() => {
+    for (const server of servers) {
+      try {
+        server.close()
+      } catch {
+        /* ignore */
+      }
     }
-  }
+    app.quit()
+  })
 })

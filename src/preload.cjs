@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('desktop', {
   hideMyTiming: () => ipcRenderer.invoke('desktop:hideMyTiming'),
   openEmployeePortal: (payload) => ipcRenderer.invoke('desktop:openEmployeePortal', payload),
   setMyTimingSize: (payload) => ipcRenderer.invoke('desktop:setMyTimingSize', payload),
+  setTheme: (theme) => ipcRenderer.invoke('desktop:setTheme', theme),
+  moveMyTimingBy: (payload) => ipcRenderer.send('desktop:moveMyTimingBy', payload),
   showNotification: (payload) => ipcRenderer.invoke('desktop:showNotification', payload),
   onStatus: (fn) => {
     const listener = (_event, status) => fn(status)

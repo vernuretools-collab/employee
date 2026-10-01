@@ -65,6 +65,9 @@ export function supabaseAnonKey() {
   return process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || ''
 }
 
-export const CAPTURE_INTERVAL_MS = 5 * 60 * 1000
+export const CAPTURE_INTERVAL_MS = 10 * 60 * 1000
+export const IDLE_GRACE_MS = 20 * 60 * 1000
+export const IDLE_POLL_MS = 15 * 1000
+export const IDLE_FLUSH_MS = 60 * 1000
 export const ATTENDANCE_POLL_MS = 20 * 1000
 export const SCREENSHOT_BUCKET = 'work-screenshots'
